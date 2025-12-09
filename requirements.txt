@@ -1,0 +1,10 @@
+numpy
+pandas
+matplotlib
+torch
+scipy
+tqdm
+torch-topological
+glob
+os
+time
