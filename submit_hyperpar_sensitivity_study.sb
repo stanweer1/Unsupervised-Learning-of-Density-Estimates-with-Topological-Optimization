@@ -1,0 +1,156 @@
+#!/bin/bash --login
+
+#############################################
+# 1. CONFIGURATION
+#############################################
+
+# Only 1D datasets for sensitivity study
+DATASETS=(
+    "1D_bimodal"
+    "1D_complex"
+)
+
+# Seeds (10–20 recommended)
+SEEDS=({0..24})
+
+# Baseline values
+BASE_PE=1        # alpha_pe
+BASE_TP=1        # alpha_tp
+BASE_REG=0       # lambda_smooth
+BASE_GRID=200     # grid_per_dim
+
+# Sensitivity values (one-way sweeps)
+PE_VALUES=(0 0.25 0.5 0.75 1 1.25 1.5 1.75 2)       # only a_PE varies
+TP_VALUES=(0 0.25 0.5 0.75 1 1.25 1.5 1.75 2)       # only a_TP varies
+GRID_VALUES=(50 100 150 200 250)      # only grid resolution varies
+
+# Max allowed concurrent jobs
+MAX_JOBS=1000
+USER_NAME=$(whoami)
+
+
+#############################################
+# 2. SETUP
+#############################################
+
+job_directory=$PWD
+output_dir="${job_directory}/.out"
+error_dir="${job_directory}/.error"
+job_log_file="${job_directory}/jobs_sensitivity.txt"
+
+mkdir -p "$output_dir" "$error_dir"
+> "$job_log_file"
+
+echo "========================================================="
+echo "Submitting Hyperparameter Sensitivity Study"
+echo "Datasets:  ${DATASETS[@]}"
+echo "Seeds:     ${SEEDS[@]}"
+echo "Baselines: PE=$BASE_PE, TP=$BASE_TP, REG=$BASE_REG, GRID=$BASE_GRID"
+echo "========================================================="
+
+
+#############################################
+# 3. QUEUE THROTTLING
+#############################################
+
+wait_for_slot() {
+    while true; do
+        current_jobs=$(squeue -h -u "$USER_NAME" -t PD,R | wc -l)
+        if (( current_jobs < MAX_JOBS )); then
+            break
+        fi
+        echo "Queue full ($current_jobs/$MAX_JOBS). Waiting..."
+        sleep 5
+    done
+}
+
+
+#############################################
+# 4. JOB SUBMISSION FUNCTION
+#############################################
+
+submit_job() {
+    local DATASET=$1
+    local seed=$2
+    local pe=$3
+    local tp=$4
+    local reg=$5
+    local grid=$6
+    local tag=$7   # e.g., PE_sweep, TP_sweep, etc.
+
+    job_name="${tag}_${DATASET}_s${seed}_pe${pe}_tp${tp}_reg${reg}_g${grid}"
+    output_file="${output_dir}/${job_name}.out"
+    error_file="${error_dir}/${job_name}.err"
+
+    python_command="python R_9_hyperparameter_sensitivity.py ${DATASET} ${seed} ${pe} ${tp} ${reg} ${grid}"
+
+    wait_for_slot
+
+    job_id=$(cat << EOF | sbatch --parsable
+#!/bin/bash --login
+#SBATCH --job-name=${job_name}
+#SBATCH --time=00:30:00
+#SBATCH --mem=80G
+#SBATCH --cpus-per-task=1
+#SBATCH --output=${output_file}
+#SBATCH --error=${error_file}
+
+module purge
+module load Python/3.11.5-GCCcore-13.2.0
+
+source ~/Python/project_ubuntu/bin/activate
+cd "$job_directory"
+
+echo "Starting job: ${job_name}"
+${python_command}
+echo "Job ${job_name} complete."
+EOF
+)
+
+    echo "$job_id" >> "$job_log_file"
+    echo "Submitted $job_id: ${job_name}"
+}
+
+
+#############################################
+# 5. ONE-WAY SENSITIVITY SWEEPS
+#############################################
+
+echo ""
+echo "========== SWEEP 1: a_PE (count weight) =========="
+for DATASET in "${DATASETS[@]}"; do
+    for seed in "${SEEDS[@]}"; do
+        for pe in "${PE_VALUES[@]}"; do
+            submit_job "$DATASET" "$seed" "$pe" "$BASE_TP" "$BASE_REG" "$BASE_GRID" "PE"
+        done
+    done
+done
+
+
+echo ""
+echo "========== SWEEP 2: a_TP (total persistence) =========="
+for DATASET in "${DATASETS[@]}"; do
+    for seed in "${SEEDS[@]}"; do
+        for tp in "${TP_VALUES[@]}"; do
+            submit_job "$DATASET" "$seed" "$BASE_PE" "$tp" "$BASE_REG" "$BASE_GRID" "TP"
+        done
+    done
+done
+
+
+echo ""
+echo "========== SWEEP 4: Grid Resolution =========="
+for DATASET in "${DATASETS[@]}"; do
+    for seed in "${SEEDS[@]}"; do
+        for grid in "${GRID_VALUES[@]}"; do
+            submit_job "$DATASET" "$seed" "$BASE_PE" "$BASE_TP" "$BASE_REG" "$grid" "GRID"
+        done
+    done
+done
+
+
+echo ""
+echo "========================================================="
+echo "All sensitivity jobs submitted!"
+echo "Job IDs written to: $job_log_file"
+echo "========================================================="

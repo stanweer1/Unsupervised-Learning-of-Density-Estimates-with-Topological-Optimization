@@ -1,0 +1,119 @@
+#!/bin/bash --login
+
+#############################################
+# 1. CONFIGURATION
+#############################################
+
+# All datasets from 5_run_job.py
+DATASETS=(
+    "1D_bimodal"
+    "1D_complex"
+    "2D_clusters"
+    "2D_elliptical"
+    "2D_weibull"
+    "3D_gauss"
+    "3D_heavytail"
+    "3D_manifold"
+    "4D_gauss"
+    "4D_heavytail"
+    "4D_heavymixture"
+    "MNIST"
+)
+
+
+# Set seeds from 0 to 499 (for 500 total seeds)
+SEEDS=({0..99})
+
+MAX_JOBS=1000         # your limit
+USER_NAME=$(whoami)     # detects current username automatically
+
+#############################################
+# 2. SETUP
+#############################################
+job_directory=$PWD
+output_dir="${job_directory}/.out"
+error_dir="${job_directory}/.error"
+job_log_file="${job_directory}/jobs.txt"
+
+mkdir -p "$output_dir" "$error_dir"
+> "$job_log_file" # Clear job log for this new batch of runs
+
+echo "Submitting jobs for ${#DATASETS[@]} datasets, with ${#SEEDS[@]} seeds each."
+echo "Throttled submission: max $MAX_JOBS jobs at once."
+echo "Logging all submitted job IDs to: $job_log_file"
+
+#############################################
+# 3. Submission throttle function
+#############################################
+wait_for_slot() {
+    while true; do
+        # Count how many jobs this user has in PENDING (PD) or RUNNING (R) state
+        current_jobs=$(squeue -h -u "$USER_NAME" -t PD,R | wc -l)
+
+        if (( current_jobs < MAX_JOBS )); then
+            # Space available -> submit new job
+            break
+        fi
+
+        echo "Queue full ($current_jobs / $MAX_JOBS jobs). Waiting for free slot..."
+        sleep 5 # Wait 20 seconds before checking again
+    done
+}
+
+#############################################
+# 4. Loop over datasets + seeds
+#############################################
+
+for DATASET_TO_RUN in "${DATASETS[@]}"; do
+    echo "==========================================="
+    echo "Submitting jobs for dataset: $DATASET_TO_RUN"
+    echo "==========================================="
+
+    for seed in "${SEEDS[@]}"; do
+
+        # --- enforce limit BEFORE submitting ---
+        wait_for_slot
+
+        job_name="${DATASET_TO_RUN}_${seed}"
+        output_file="${output_dir}/${job_name}.out"
+        error_file="${error_dir}/${job_name}.err"
+        python_command="python R_5_main_simulation.py ${DATASET_TO_RUN} ${seed}"
+
+        job_id=$(cat << EOF | sbatch --parsable
+#!/bin/bash --login
+#SBATCH --job-name=${job_name}
+#SBATCH --time=03:30:00
+#SBATCH --mem=100G
+#SBATCH --cpus-per-task=1
+#SBATCH --output=${output_file}
+#SBATCH --error=${error_file}
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+
+# Load required modules
+module purge
+module load Python/3.11.5-GCCcore-13.2.0
+module load powertools/1.2
+
+# Activate your virtual environment
+# IMPORTANT: Update this path if it's incorrect
+source ~/Python/project_ubuntu/bin/activate
+
+# Change to the job submission directory
+cd "${job_directory}"
+
+# Run the Python script
+echo "Starting job: ${job_name}"
+${python_command}
+echo "Job ${job_name} complete."
+EOF
+        )
+
+        echo "$job_id" >> "$job_log_file"
+        echo "Submitted job $job_id for ${DATASET_TO_RUN} seed ${seed} (Queue: $(squeue -h -u "$USER_NAME" -t PD,R | wc -l)/$MAX_JOBS)"
+
+    done
+
+done
+
+echo "All jobs for all datasets have been submitted!"

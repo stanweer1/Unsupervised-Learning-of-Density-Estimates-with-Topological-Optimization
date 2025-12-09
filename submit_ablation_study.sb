@@ -1,0 +1,148 @@
+#!/bin/bash --login
+
+#############################################
+# 1. CONFIGURATION
+#############################################
+
+# Datasets for your experiment
+DATASETS=(
+    "1D_bimodal"
+    "1D_complex"
+    "2D_clusters"
+    "2D_annulus"
+    "3D_heavytail"
+    "4D_gauss"
+)
+
+DATASETS=(
+    "4D_gauss"
+)
+
+# Seeds (example: 0–49 ? 50 seeds)
+SEEDS=({0..99})
+
+# Ablation configurations: label count TP reg H0
+ABLATIONS=(
+    "full 1 1 0 1"
+    "no-count 0 1 0 1"
+    "no-TP 1 0 0 1"
+    "no-H0 1 1 0 0"
+)
+
+# Max allowed concurrent jobs
+MAX_JOBS=1000
+USER_NAME=$(whoami)
+
+
+#############################################
+# 2. SETUP
+#############################################
+
+job_directory=$PWD
+output_dir="${job_directory}/.out"
+error_dir="${job_directory}/.error"
+job_log_file="${job_directory}/jobs.txt"
+
+mkdir -p "$output_dir" "$error_dir"
+> "$job_log_file"
+
+echo "----------------------------------------------"
+echo "Submitting ablation study jobs"
+echo "Datasets: ${#DATASETS[@]}"
+echo "Seeds:    ${#SEEDS[@]}"
+echo "Configs:  ${#ABLATIONS[@]}"
+echo "Max jobs: $MAX_JOBS"
+echo "----------------------------------------------"
+
+
+#############################################
+# 3. Queue throttle function
+#############################################
+
+wait_for_slot() {
+    while true; do
+        current_jobs=$(squeue -h -u "$USER_NAME" -t PD,R | wc -l)
+
+        if (( current_jobs < MAX_JOBS )); then
+            break
+        fi
+
+        echo "Queue full ($current_jobs / $MAX_JOBS). Waiting..."
+        sleep 20
+    done
+}
+
+
+#############################################
+# 4. MAIN SUBMISSION LOOP
+#############################################
+
+for DATASET in "${DATASETS[@]}"; do
+    echo ""
+    echo "==============================================="
+    echo "Submitting jobs for dataset: $DATASET"
+    echo "==============================================="
+
+    for seed in "${SEEDS[@]}"; do
+        for config in "${ABLATIONS[@]}"; do
+
+            # Parse config line into variables
+            read label count_on TP_on ref_on only_H0 <<< "$config"
+
+            # Throttle before submitting
+            wait_for_slot
+
+            # Job naming
+            job_name="${DATASET}_${seed}_${label}"
+            output_file="${output_dir}/${job_name}.out"
+            error_file="${error_dir}/${job_name}.err"
+
+            # Python command (7 arguments)
+            python_command="python R_7_ablation_study.py \
+                ${DATASET} ${seed} ${count_on} ${TP_on} ${ref_on} ${only_H0} ${label}"
+
+            #############################################
+            # Submit the job
+            #############################################
+
+            job_id=$(cat << EOF | sbatch --parsable
+#!/bin/bash --login
+#SBATCH --job-name=${job_name}
+#SBATCH --time=02:30:00
+#SBATCH --mem=100G
+#SBATCH --cpus-per-task=1
+#SBATCH --output=${output_file}
+#SBATCH --error=${error_file}
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+
+module purge
+module load Python/3.11.5-GCCcore-13.2.0
+module load powertools/1.2
+
+# Activate your virtual environment
+source ~/Python/project_ubuntu/bin/activate
+
+# Execute from submission directory
+cd "${job_directory}"
+
+echo "Starting job: ${job_name}"
+${python_command}
+echo "Job ${job_name} complete."
+EOF
+)
+
+            # Log job ID
+            echo "$job_id" >> "$job_log_file"
+
+            # Status print
+            current_jobs=$(squeue -h -u "$USER_NAME" -t PD,R | wc -l)
+            echo "Submitted job $job_id:  ${job_name}   (Queue: ${current_jobs}/${MAX_JOBS})"
+
+        done
+    done
+done
+
+echo ""
+echo "All ablation jobs have been submitted!"
+echo "Logged job IDs to: $job_log_file"
