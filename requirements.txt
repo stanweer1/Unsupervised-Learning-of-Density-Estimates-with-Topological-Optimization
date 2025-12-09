@@ -8,3 +8,8 @@ torch-topological
 glob
 os
 time
+scikit-learn
+ot
+KDEpy
+statsmodels
+random
